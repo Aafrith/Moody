@@ -455,8 +455,13 @@ class EmotionRecognitionApp:
         except Exception:
             pass
         
-        # Force profile selection on startup
-        self.root.after(500, self.force_profile_selection)
+        # Auto-login from launcher (via env var)
+        launch_user = os.environ.get("MOODY_USER", None)
+        if launch_user:
+            self.root.after(500, lambda: self._load_user_profile(launch_user))
+        else:
+            # Fallback: if launched directly without launcher, go back to dashboard
+            self.root.after(500, self._require_launcher_login)
 
     def setup_ui(self):
         self.root.title("Emotion Recognition + Gesture Control Assistant")
@@ -964,15 +969,13 @@ class EmotionRecognitionApp:
             messagebox.showerror("Error", "Camera not available")
             return
         
-        # Require login
+        # Require user (should already be set via launcher)
         if self.current_user is None:
             messagebox.showwarning(
                 "Login Required",
-                "Please login or register to start emotion detection."
+                "Please login through the Moody Launcher."
             )
-            self.show_profile_selector()
-            if self.current_user is None:  # User cancelled
-                return
+            return
         
         self.detection_active = True
         self.session_start_time = datetime.now()
@@ -1330,233 +1333,27 @@ class EmotionRecognitionApp:
             self.show_background_popup()
 
     # ========== PROFILE MANAGEMENT ==========
+    def _require_launcher_login(self):
+        """If no MOODY_USER env var, redirect to launcher for login."""
+        messagebox.showinfo(
+            "Login Required",
+            "Please login through the Moody Launcher first."
+        )
+        self.back_to_dashboard(force_close=True)
+
     def force_profile_selection(self):
-        """Force user to select profile on startup"""
+        """Kept for compatibility – redirects to dashboard."""
         if self.current_user is None:
-            self.show_profile_selector()
-            if self.current_user is None:
-                # User closed without selecting, show again
-                messagebox.showwarning(
-                    "Profile Required",
-                    "Please login or register to continue using the application."
-                )
-                self.root.after(100, self.force_profile_selection)
+            self._require_launcher_login()
     
     def show_profile_selector(self):
-        """Show profile selection dialog with login/register"""
-        selector = tk.Toplevel(self.root)
-        selector.title("Login / Register")
-        selector.configure(bg='#1a1a1a')
-        selector.geometry("450x600")
-        selector.transient(self.root)
-        selector.grab_set()
-        
-        # Center the window
-        selector.update_idletasks()
-        x = (selector.winfo_screenwidth() // 2) - (450 // 2)
-        y = (selector.winfo_screenheight() // 2) - (600 // 2)
-        selector.geometry(f"450x600+{x}+{y}")
-        
-        # Track if user is coming from force selection (no user yet)
-        is_forced_login = self.current_user is None
-        
-        # Prevent closing without selection only if forced
-        def on_close():
-            if is_forced_login and self.current_user is None:
-                response = messagebox.askyesno(
-                    "Exit",
-                    "You must login to use the application. Exit to dashboard?"
-                )
-                if response:
-                    self.back_to_dashboard()
-            else:
-                selector.destroy()
-        
-        selector.protocol("WM_DELETE_WINDOW", on_close)
-        
-        frame = ttk.Frame(selector, style='Dark.TFrame', padding=20)
-        frame.pack(fill='both', expand=True)
-        
-        ttk.Label(
-            frame,
-            text="🔒 Secure Login",
-            style='Title.TLabel',
-            font=('Segoe UI', 18, 'bold')
-        ).pack(pady=(0, 20))
-        
-        # Create notebook for Login/Register tabs
-        auth_notebook = ttk.Notebook(frame)
-        auth_notebook.pack(fill='both', expand=True, pady=(0, 15))
-        
-        # LOGIN TAB
-        login_frame = ttk.Frame(auth_notebook, style='Dark.TFrame', padding=20)
-        auth_notebook.add(login_frame, text="🔑 Login")
-        
-        ttk.Label(
-            login_frame,
-            text="Username:",
-            style='Dark.TLabel',
-            font=('Segoe UI', 11)
-        ).pack(anchor='w', pady=(10, 5))
-        
-        login_username = ttk.Entry(login_frame, font=('Segoe UI', 11), width=30)
-        login_username.pack(fill='x', pady=(0, 15))
-        
-        ttk.Label(
-            login_frame,
-            text="Password:",
-            style='Dark.TLabel',
-            font=('Segoe UI', 11)
-        ).pack(anchor='w', pady=(0, 5))
-        
-        login_password = ttk.Entry(login_frame, font=('Segoe UI', 11), width=30, show='*')
-        login_password.pack(fill='x', pady=(0, 20))
-        
-        def do_login():
-            username = login_username.get().strip()
-            password = login_password.get()
-            
-            if not username or not password:
-                messagebox.showerror("Error", "Please enter both username and password!")
-                return
-            
-            if self._verify_login(username, password):
-                self._load_user_profile(username)
-                selector.destroy()
-            else:
-                messagebox.showerror("Login Failed", "Invalid username or password!")
-                login_password.delete(0, 'end')
-        
-        ttk.Button(
-            login_frame,
-            text="✓ Login",
-            style='Gesture.TButton',
-            command=do_login
-        ).pack(fill='x', pady=5)
-        
-        # Bind Enter key to login
-        login_password.bind('<Return>', lambda e: do_login())
-        
-        # REGISTER TAB
-        register_frame = ttk.Frame(auth_notebook, style='Dark.TFrame', padding=20)
-        auth_notebook.add(register_frame, text="➕ Register")
-        
-        ttk.Label(
-            register_frame,
-            text="Username:",
-            style='Dark.TLabel',
-            font=('Segoe UI', 11)
-        ).pack(anchor='w', pady=(10, 5))
-        
-        register_username = ttk.Entry(register_frame, font=('Segoe UI', 11), width=30)
-        register_username.pack(fill='x', pady=(0, 15))
-        
-        ttk.Label(
-            register_frame,
-            text="Password:",
-            style='Dark.TLabel',
-            font=('Segoe UI', 11)
-        ).pack(anchor='w', pady=(0, 5))
-        
-        register_password = ttk.Entry(register_frame, font=('Segoe UI', 11), width=30, show='*')
-        register_password.pack(fill='x', pady=(0, 15))
-        
-        ttk.Label(
-            register_frame,
-            text="Confirm Password:",
-            style='Dark.TLabel',
-            font=('Segoe UI', 11)
-        ).pack(anchor='w', pady=(0, 5))
-        
-        register_confirm = ttk.Entry(register_frame, font=('Segoe UI', 11), width=30, show='*')
-        register_confirm.pack(fill='x', pady=(0, 20))
-        
-        def do_register():
-            username = register_username.get().strip()
-            password = register_password.get()
-            confirm = register_confirm.get()
-            
-            if not username or not password or not confirm:
-                messagebox.showerror("Error", "Please fill in all fields!")
-                return
-            
-            if len(username) < 3:
-                messagebox.showerror("Error", "Username must be at least 3 characters!")
-                return
-            
-            if len(password) < 6:
-                messagebox.showerror("Error", "Password must be at least 6 characters!")
-                return
-            
-            if password != confirm:
-                messagebox.showerror("Error", "Passwords do not match!")
-                return
-            
-            if self._username_exists(username):
-                messagebox.showerror("Error", f"Username '{username}' already exists!")
-                return
-            
-            # Create new account
-            if self._create_account(username, password):
-                messagebox.showinfo("Success", f"Account created successfully!\nYou can now login.")
-                # Switch to login tab
-                auth_notebook.select(login_frame)
-                login_username.delete(0, 'end')
-                login_username.insert(0, username)
-                login_password.focus()
-            else:
-                messagebox.showerror("Error", "Failed to create account!")
-        
-        ttk.Button(
-            register_frame,
-            text="✓ Register",
-            style='Gesture.TButton',
-            command=do_register
-        ).pack(fill='x', pady=5)
-        
-        # Bind Enter key to register
-        register_confirm.bind('<Return>', lambda e: do_register())
-        
-        # Back to Dashboard button
-        ttk.Label(
-            frame,
-            text="Or",
-            style='Dark.TLabel',
-            font=('Segoe UI', 10, 'italic')
-        ).pack(pady=5)
-        
-        ttk.Button(
-            frame,
-            text="🏠 Back to Dashboard",
-            style='Gesture.TButton',
-            command=lambda: self._back_to_dashboard_from_login(selector)
-        ).pack(fill='x', pady=5)
-        
-        # Guest option (optional - without password)
-        ttk.Label(
-            frame,
-            text="Quick Access",
-            style='Dark.TLabel',
-            font=('Segoe UI', 10, 'italic')
-        ).pack(pady=5)
-        
-        def continue_as_guest():
-            response = messagebox.askyesno(
-                "Guest Mode",
-                "Continue as Guest?\n\nNote: Guest data is not saved permanently."
-            )
-            if response:
-                self._load_user_profile("Guest")
-                selector.destroy()
-        
-        ttk.Button(
-            frame,
-            text="🚶 Continue as Guest (No Password)",
-            style='Dark.TButton',
-            command=continue_as_guest
-        ).pack(fill='x', pady=5)
-        
-        selector.wait_window()
+        """Login is now handled by the launcher. Redirect to dashboard."""
+        response = messagebox.askyesno(
+            "Switch User",
+            "To switch users you will be redirected to the Moody Launcher.\n\nContinue?"
+        )
+        if response:
+            self.back_to_dashboard()
     
     def _load_profiles(self):
         """Load list of existing profiles with passwords"""
@@ -1609,16 +1406,6 @@ class EmotionRecognitionApp:
             print(f"Error creating account: {e}")
             return False
     
-    def _back_to_dashboard_from_login(self, login_window):
-        """Handle back to dashboard from login window"""
-        response = messagebox.askyesno(
-            "Back to Dashboard",
-            "Return to the main dashboard?\n\nYou need to login to use this module."
-        )
-        if response:
-            login_window.destroy()
-            self.back_to_dashboard(force_close=True)
-    
     def _load_user_profile(self, username):
         """Load user profile and settings"""
         self.current_user = username
@@ -1650,7 +1437,7 @@ class EmotionRecognitionApp:
                 json.dump(self.user_settings, f, indent=2)
     
     def logout_user(self):
-        """Logout current user and return to profile selection"""
+        """Logout current user and return to launcher dashboard"""
         if self.detection_active:
             response = messagebox.askyesno(
                 "Logout",
@@ -1666,29 +1453,8 @@ class EmotionRecognitionApp:
             self._save_emotion_log()
             self._save_user_settings()
         
-        # Clear current user
-        saved_user = self.current_user
-        self.current_user = None
-        self.current_user_label.configure(
-            text="Not logged in",
-            foreground='#ff6666'
-        )
-        self.emotion_log = []
-        self.user_settings = {}
-        
-        # Close analytics tab if open
-        if self.analytics_tab is not None:
-            try:
-                self.main_notebook.forget(self.analytics_tab)
-                self.analytics_tab = None
-            except:
-                pass
-        
-        # Show logout confirmation
-        messagebox.showinfo("Logged Out", f"{saved_user} has been logged out successfully.\n\nPlease login again to continue.")
-        
-        # Show profile selector - must login again
-        self.show_profile_selector()
+        # Return to dashboard (launcher) for re-login
+        self.back_to_dashboard()
     
     def back_to_dashboard(self, force_close=False):
         """Return to the main dashboard launcher"""
