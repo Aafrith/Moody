@@ -996,26 +996,20 @@ class EmotionRecognitionApp:
         self.detection_active = False
         self.start_btn.configure(state='normal')
         self.stop_btn.configure(state='disabled')
-        self.gesture_btn.configure(state='disabled')
         self.background_btn.configure(state='disabled')
         
         # Save emotion log
         if self.current_user:
             self._save_emotion_log()
 
-        # Stop gesture control if active
-        if self.gesture_controller.running:
-            self.gesture_controller.stop()
-            self.gesture_btn.configure(text="🖐️ Enable Gestures")
-            self.gesture_status_label.configure(text="Gesture Control: OFF")
-            if self.popup_gesture_btn is not None and self.popup_gesture_btn.winfo_exists():
-                self.popup_gesture_btn.configure(text="🖐️ Enable Gestures")
-                self.popup_gesture_btn.state(["disabled"])
+        # Keep gesture control running if active — only stop emotion detection
+        # Gesture button stays enabled so user can toggle gestures independently
+        self.gesture_btn.configure(state='normal')
 
     def toggle_gesture_control(self):
-        # Require detection / camera
-        if not self.detection_active or self.cap is None:
-            messagebox.showwarning("Gesture Control", "Start detection before enabling hand gestures.")
+        # Only require camera to be available
+        if self.cap is None:
+            messagebox.showwarning("Gesture Control", "Camera is not available. Cannot enable hand gestures.")
             return
 
         if not self.gesture_controller.running:
