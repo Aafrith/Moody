@@ -13,6 +13,10 @@ import webbrowser
 import warnings
 import json
 import re
+import socket
+import zipfile
+import urllib.request
+import shutil
 from datetime import datetime
 from pathlib import Path
 from difflib import SequenceMatcher
@@ -33,6 +37,12 @@ except ImportError:
     TTS_AVAILABLE = False
 
 try:
+    import vosk
+    VOSK_AVAILABLE = True
+except ImportError:
+    VOSK_AVAILABLE = False
+
+try:
     import pyautogui
     PYAUTOGUI_AVAILABLE = True
 except ImportError:
@@ -43,6 +53,142 @@ try:
     PYNPUT_AVAILABLE = True
 except ImportError:
     PYNPUT_AVAILABLE = False
+
+
+# ============================================================
+# Network connectivity check (cached)
+# ============================================================
+_net_cache = {"available": None, "checked_at": 0}
+
+def _is_internet_available(cache_seconds=30):
+    """Quick check for internet connectivity with caching."""
+    now = time.time()
+    if now - _net_cache["checked_at"] < cache_seconds:
+        return _net_cache["available"]
+    try:
+        sock = socket.create_connection(("8.8.8.8", 53), timeout=1.5)
+        sock.close()
+        _net_cache["available"] = True
+    except (OSError, socket.timeout):
+        _net_cache["available"] = False
+    _net_cache["checked_at"] = now
+    return _net_cache["available"]
+
+
+# ============================================================
+# Vosk Offline Model Manager
+# ============================================================
+_VOSK_MODEL_URL = "https://alphacephei.com/vosk/models/vosk-model-en-us-0.22-lgraph.zip"
+_VOSK_MODEL_DIR_NAME = "vosk_model"
+
+class VoskModelManager:
+    """Downloads, caches, and provides the Vosk offline speech model."""
+
+    def __init__(self, base_dir=None, on_log=None):
+        if base_dir is None:
+            base_dir = os.path.dirname(os.path.abspath(__file__))
+        self.model_dir = os.path.join(base_dir, _VOSK_MODEL_DIR_NAME)
+        self.on_log = on_log or (lambda msg, tag: None)
+        self._model = None
+        self._recognizer = None
+
+    @property
+    def is_ready(self):
+        return self._model is not None
+
+    def load_or_download(self):
+        """Load existing model or download if missing. Returns True on success."""
+        if not VOSK_AVAILABLE:
+            self.on_log("⚠️ Vosk not installed. Offline recognition unavailable.", "error")
+            return False
+
+        # Check if model directory exists and has content
+        if os.path.isdir(self.model_dir) and any(
+            f for f in os.listdir(self.model_dir)
+            if not f.startswith('.')
+        ):
+            return self._load_model()
+
+        # Try to download
+        self.on_log("📦 Downloading offline speech model (~40MB)... first-time setup.", "system")
+        return self._download_and_extract()
+
+    def _load_model(self):
+        """Load the Vosk model from disk."""
+        try:
+            vosk.SetLogLevel(-1)  # Suppress Vosk's own logging
+            self._model = vosk.Model(self.model_dir)
+            self.on_log("✅ Offline speech model loaded.", "system")
+            return True
+        except Exception as e:
+            self.on_log(f"❌ Failed to load Vosk model: {e}", "error")
+            self._model = None
+            return False
+
+    def _download_and_extract(self):
+        """Download the Vosk model zip and extract it."""
+        zip_path = self.model_dir + ".zip"
+        try:
+            # Download with progress
+            def _report(block_num, block_size, total_size):
+                if total_size > 0:
+                    pct = min(100, int(block_num * block_size * 100 / total_size))
+                    if pct % 20 == 0:
+                        self.on_log(f"📦 Downloading model... {pct}%", "system")
+
+            urllib.request.urlretrieve(_VOSK_MODEL_URL, zip_path, _report)
+            self.on_log("📂 Extracting model...", "system")
+
+            # Extract
+            with zipfile.ZipFile(zip_path, 'r') as zf:
+                # The zip contains a top-level folder; extract and rename
+                extract_tmp = self.model_dir + "_tmp"
+                zf.extractall(extract_tmp)
+
+                # Find the extracted model folder
+                extracted = [d for d in os.listdir(extract_tmp)
+                             if os.path.isdir(os.path.join(extract_tmp, d))]
+                if extracted:
+                    src = os.path.join(extract_tmp, extracted[0])
+                    if os.path.exists(self.model_dir):
+                        shutil.rmtree(self.model_dir)
+                    shutil.move(src, self.model_dir)
+                shutil.rmtree(extract_tmp, ignore_errors=True)
+
+            # Clean up zip
+            os.remove(zip_path)
+
+            return self._load_model()
+
+        except Exception as e:
+            self.on_log(f"⚠️ Could not download offline model: {e}", "error")
+            self.on_log("ℹ️ Assistant will use online recognition only.", "system")
+            # Clean up partial downloads
+            if os.path.exists(zip_path):
+                os.remove(zip_path)
+            return False
+
+    def create_recognizer(self, sample_rate=16000, grammar=None):
+        """Create a fresh Vosk recognizer, optionally grammar-constrained.
+        
+        Args:
+            sample_rate: Audio sample rate (default 16000).
+            grammar: Optional list of phrases to constrain recognition.
+                     When provided, Vosk will ONLY output phrases from this list,
+                     dramatically improving accuracy for known commands.
+        """
+        if self._model is None:
+            return None
+        try:
+            if grammar:
+                grammar_json = json.dumps(grammar)
+                rec = vosk.KaldiRecognizer(self._model, sample_rate, grammar_json)
+            else:
+                rec = vosk.KaldiRecognizer(self._model, sample_rate)
+            rec.SetWords(True)
+            return rec
+        except Exception:
+            return None
 
 
 # ============================================================
@@ -1337,16 +1483,24 @@ class MoodyVoiceAssistant:
         self._lock = threading.Lock()
         self._listen_thread = None
 
-        # Speech recognizer
+        # Speech recognizer (used for Google fallback + audio capture)
         if SR_AVAILABLE:
             self.recognizer = sr.Recognizer()
             self.recognizer.energy_threshold = 300
             self.recognizer.dynamic_energy_threshold = True
-            self.recognizer.pause_threshold = 0.8
+            self.recognizer.pause_threshold = 0.5  # Faster end-of-speech detection
+            self.recognizer.phrase_threshold = 0.2
+            self.recognizer.non_speaking_duration = 0.3
             self.microphone = None
         else:
             self.recognizer = None
             self.microphone = None
+
+        # Vosk offline model
+        self._vosk_manager = VoskModelManager(on_log=self.on_log)
+        self._vosk_ready = False
+        self._wake_recognizer = None
+        self._command_recognizer = None
 
         # TTS engine
         self._tts_engine = None
@@ -1355,12 +1509,38 @@ class MoodyVoiceAssistant:
         # Command registry
         self.command_registry = CommandRegistry(self, gesture_toggle_callback=gesture_toggle_callback)
 
+        # Build grammar lists for Vosk constrained recognition
+        self._wake_grammar = list(set(self.WAKE_WORDS))  # Wake word phrases
+        self._command_grammar = self._build_command_grammar()
+
         # Awake timeout
         self.awake_timeout = 45
         self._last_command_time = 0
 
         # Command history
         self.command_history = []
+
+    def _build_command_grammar(self):
+        """Build a grammar list of all known command phrases for Vosk."""
+        phrases = set()
+        # Add all command triggers
+        for trigger in self.command_registry.commands:
+            phrases.add(trigger)
+        # Add all aliases
+        for alias in self.command_registry._alias_map:
+            phrases.add(alias)
+        # Add wake words (user may say wake word + command in one utterance)
+        for wake in self.WAKE_WORDS:
+            phrases.add(wake)
+        # Add common filler words so Vosk can parse natural phrases
+        fillers = [
+            "can you", "could you", "please", "the", "a", "my", "this",
+            "i want to", "i need to", "let me", "hey", "ok", "okay",
+            "right now", "now", "for me", "just", "it", "that",
+        ]
+        for f in fillers:
+            phrases.add(f)
+        return list(phrases)
 
     # -- TTS --
     def _get_tts(self):
@@ -1414,13 +1594,23 @@ class MoodyVoiceAssistant:
         if self.running:
             return True
 
+        # Load Vosk model (downloads on first run)
+        self._vosk_ready = self._vosk_manager.load_or_download()
+        if not self._vosk_ready:
+            self.on_log("⚠️ Offline mode unavailable. Will use online recognition only.", "system")
+        else:
+            # Create persistent recognizers to avoid memory leaks
+            self._wake_recognizer = self._vosk_manager.create_recognizer(grammar=self._wake_grammar)
+            self._command_recognizer = self._vosk_manager.create_recognizer(grammar=self._command_grammar)
+
         self.running = True
         self.listening = True
         self.awake = False
         self._last_command_time = 0
 
         self.on_status_change("💤 Sleeping – Say 'Hey Moody' to wake")
-        self.on_log("🎤 Voice assistant started. Say 'Hey Moody' to begin!", "system")
+        mode_label = "offline + online" if self._vosk_ready else "online only"
+        self.on_log(f"🎤 Voice assistant started ({mode_label}). Say 'Hey Moody' to begin!", "system")
 
         self._listen_thread = threading.Thread(target=self._listen_loop, daemon=True)
         self._listen_thread.start()
@@ -1442,6 +1632,7 @@ class MoodyVoiceAssistant:
 
     # -- Core Listening Loop --
     def _listen_loop(self):
+        error_backoff = 0.5
         try:
             self.microphone = sr.Microphone()
             with self.microphone as source:
@@ -1452,22 +1643,53 @@ class MoodyVoiceAssistant:
             while self.running:
                 try:
                     self._listen_once()
+                    error_backoff = 0.5  # Reset backoff on success
                 except Exception as e:
                     if self.running:
                         self.on_log(f"⚠️ Listening error: {str(e)}", "error")
-                        time.sleep(1)
+                        time.sleep(min(error_backoff, 5.0))
+                        error_backoff *= 1.5  # Exponential backoff
 
                 if self.awake and self._last_command_time > 0:
                     if time.time() - self._last_command_time > self.awake_timeout:
                         self.set_awake(False)
                         self.speak("Going to sleep. Say 'Hey Moody' when you need me.")
 
-                time.sleep(0.05)
+                time.sleep(0.02)
 
         except Exception as e:
             self.on_log(f"❌ Microphone error: {str(e)}", "error")
             self.on_status_change("❌ Microphone not available")
             self.running = False
+
+    def _recognize_with_vosk(self, audio_data, recognizer=None):
+        """Run Vosk offline recognition on captured audio.
+        
+        Args:
+            audio_data: SpeechRecognition AudioData object.
+            recognizer: The persistent Vosk KaldiRecognizer instance to use.
+        Returns:
+            Recognized text or None.
+        """
+        if not self._vosk_ready or recognizer is None:
+            return None
+        try:
+            # Convert SpeechRecognition AudioData to raw PCM for Vosk
+            raw = audio_data.get_raw_data(convert_rate=16000, convert_width=2)
+            recognizer.AcceptWaveform(raw)
+            result = json.loads(recognizer.FinalResult())
+            text = result.get("text", "").strip()
+            return text if text else None
+        except Exception:
+            return None
+
+    def _recognize_with_google(self, audio_data):
+        """Run Google online recognition. Returns text or None."""
+        try:
+            text = self.recognizer.recognize_google(audio_data)
+            return text.strip() if text else None
+        except (sr.UnknownValueError, sr.RequestError):
+            return None
 
     def _listen_once(self):
         if not self.running:
@@ -1477,10 +1699,10 @@ class MoodyVoiceAssistant:
             with sr.Microphone() as source:
                 if self.awake:
                     self.on_status_change("🟢 Listening for command...")
-                    audio = self.recognizer.listen(source, timeout=8, phrase_time_limit=12)
+                    audio = self.recognizer.listen(source, timeout=6, phrase_time_limit=10)
                 else:
                     self.on_status_change("💤 Waiting for 'Hey Moody'...")
-                    audio = self.recognizer.listen(source, timeout=5, phrase_time_limit=5)
+                    audio = self.recognizer.listen(source, timeout=3, phrase_time_limit=3)
         except sr.WaitTimeoutError:
             return
         except Exception:
@@ -1489,17 +1711,43 @@ class MoodyVoiceAssistant:
         if not self.running:
             return
 
-        try:
-            self.on_status_change("🔄 Processing speech...")
-            text = self.recognizer.recognize_google(audio)
+        self.on_status_change("🔄 Processing speech...")
+
+        # ── Strategy: Vosk first (instant, offline), Google fallback (if online) ──
+
+        # 1. Try Vosk offline recognition (always available, instant)
+        # Use strict grammar depending on state
+        if not self.awake:
+            vosk_text = self._recognize_with_vosk(audio, recognizer=self._wake_recognizer)
+        else:
+            vosk_text = self._recognize_with_vosk(audio, recognizer=self._command_recognizer)
+
+        # 2. For wake word detection: Vosk-only is sufficient (no need for Google)
+        if not self.awake:
+            text = vosk_text
+            if not text:
+                # Fallback to Google only if Vosk unavailable/failed AND we're online
+                if not self._vosk_ready and _is_internet_available():
+                    text = self._recognize_with_google(audio)
             if not text:
                 return
-            text = text.strip()
-        except sr.UnknownValueError:
-            return
-        except sr.RequestError as e:
-            self.on_log(f"⚠️ Speech API error: {str(e)}", "error")
-            return
+        else:
+            # For commands: use Vosk result, try Google if online for better accuracy
+            if vosk_text:
+                text = vosk_text
+                # Optionally refine with Google if online (for complex queries)
+                if _is_internet_available():
+                    google_text = self._recognize_with_google(audio)
+                    if google_text and len(google_text) > len(vosk_text) * 0.5:
+                        text = google_text  # Google usually more accurate
+            else:
+                # Vosk failed or unavailable — try Google
+                if _is_internet_available():
+                    text = self._recognize_with_google(audio)
+                else:
+                    return  # No recognition available
+            if not text:
+                return
 
         text_lower = text.lower()
 
