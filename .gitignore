@@ -5,5 +5,4 @@ __pycache__/
 
 # Model data
 emotion_gesture/model2/
-emotion_gesture/vosk_model/
 *venv

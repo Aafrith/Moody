@@ -2020,48 +2020,28 @@ class EmotionRecognitionApp:
         """Toggle gesture mouse control from voice command."""
         try:
             if action == "enable":
-                # Auto-initialize camera if not available
-                if self.cap is None:
-                    self._voice_log("Initializing camera for gesture control...", "system")
-                    try:
-                        self.setup_camera()
-                    except Exception:
-                        pass
-                if self.cap is None:
-                    self._voice_log("Camera is not available. Cannot enable gesture mouse.", "error")
+                if not self.detection_active or self.cap is None:
+                    self._voice_log("Start detection first before enabling gesture mouse.", "error")
                     return
-
                 if not self.gesture_controller.running:
                     self.gesture_controller.start(self.cap)
-                    # Update UI elements safely from any thread
-                    def _update_ui():
-                        try:
-                            self.gesture_btn.configure(text="\U0001f590\ufe0f Disable Gestures")
-                            self.gesture_btn.configure(state='normal')
-                            self.gesture_status_label.configure(
-                                text="Gesture Control: ON (Show 5 fingers to activate mouse)"
-                            )
-                            if self.popup_gesture_btn is not None and self.popup_gesture_btn.winfo_exists():
-                                self.popup_gesture_btn.configure(text="\U0001f590\ufe0f Disable Gestures")
-                                self.popup_gesture_btn.state(["!disabled"])
-                        except Exception:
-                            pass
-                    self.root.after(0, _update_ui)
+                    self.gesture_btn.configure(text="\U0001f590\ufe0f Disable Gestures")
+                    self.gesture_status_label.configure(
+                        text="Gesture Control: ON (Show 5 fingers to activate mouse)"
+                    )
+                    if self.popup_gesture_btn is not None and self.popup_gesture_btn.winfo_exists():
+                        self.popup_gesture_btn.configure(text="\U0001f590\ufe0f Disable Gestures")
+                        self.popup_gesture_btn.state(["!disabled"])
                     self._voice_log("Gesture mouse control ENABLED.", "system")
                 else:
                     self._voice_log("Gesture mouse is already enabled.", "system")
             elif action == "disable":
                 if self.gesture_controller.running:
                     self.gesture_controller.stop()
-                    def _update_ui():
-                        try:
-                            self.gesture_btn.configure(text="\U0001f590\ufe0f Enable Gestures")
-                            self.gesture_status_label.configure(text="Gesture Control: OFF")
-                            if self.popup_gesture_btn is not None and self.popup_gesture_btn.winfo_exists():
-                                self.popup_gesture_btn.configure(text="\U0001f590\ufe0f Enable Gestures")
-                        except Exception:
-                            pass
-                    self.root.after(0, _update_ui)
+                    self.gesture_btn.configure(text="\U0001f590\ufe0f Enable Gestures")
+                    self.gesture_status_label.configure(text="Gesture Control: OFF")
+                    if self.popup_gesture_btn is not None and self.popup_gesture_btn.winfo_exists():
+                        self.popup_gesture_btn.configure(text="\U0001f590\ufe0f Enable Gestures")
                     self._voice_log("Gesture mouse control DISABLED.", "system")
                 else:
                     self._voice_log("Gesture mouse is already disabled.", "system")
